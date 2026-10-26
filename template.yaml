@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Order API with Cognito authorization and WAF rate limiting
+
+Resources:
+  OrdersUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: OrdersUserPool
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+  OrdersUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref OrdersUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  OrdersApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: OrdersApi
+      StageName: Prod
+      Auth:
+        DefaultAuthorizer: OrdersCognitoAuthorizer
+        Authorizers:
+          OrdersCognitoAuthorizer:
+            UserPoolArn: !GetAtt OrdersUserPool.Arn
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Orders
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+        - AttributeName: itemId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+        - AttributeName: itemId
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  SaveOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Tracing: Active
+      Description: Saves an order item to the Orders DynamoDB table
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdersTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt OrdersTable.Arn
+      Events:
+        CreateOrder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OrdersApi
+            Path: /orders
+            Method: post
+
+  OrdersWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: OrdersApiRateLimit
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: OrdersApiWebAcl
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: LimitRequestsPerIp
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 1000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: OrdersApiRateLimit
+            SampledRequestsEnabled: true
+
+  OrdersWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: OrdersApiProdStage
+    Properties:
+      WebACLArn: !GetAtt OrdersWebAcl.Arn
+      ResourceArn: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${OrdersApi}/stages/Prod
+
+  OrdersMonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: OrdersApiDashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "API Gateway Requests and 4XX Errors",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 300,
+                "metrics": [
+                  [ "AWS/ApiGateway", "Count", "ApiName", "OrdersApi", "Stage", "Prod" ],
+                  [ ".", "4XXError", ".", ".", ".", "." ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Lambda Invocations and Errors",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 300,
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${SaveOrderFunction}" ],
+                  [ ".", "Errors", ".", "." ]
+                ]
+              }
+            }
+          ]
+        }
+
+Outputs:
+  OrdersApiUrl:
+    Description: URL for the authenticated order-creation API
+    Value: !Sub https://${OrdersApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/orders
+  OrdersUserPoolId:
+    Description: Cognito user pool ID for API users
+    Value: !Ref OrdersUserPool
+  OrdersUserPoolClientId:
+    Description: Cognito app client ID for obtaining user tokens
+    Value: !Ref OrdersUserPoolClient
+  OrdersDashboardName:
+    Description: CloudWatch dashboard for API and Lambda metrics
+    Value: !Ref OrdersMonitoringDashboard

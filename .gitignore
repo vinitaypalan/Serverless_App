@@ -1,0 +1,13 @@
+
+# AWS SAM generated build files
+.aws-sam/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.aws/
+
+# Python generated files, if applicable
+__pycache__/
+*.pyc
