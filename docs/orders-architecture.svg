@@ -135,6 +135,6 @@
 <path d="M920 450 H1000 V475 H1130 V480" fill="none" stroke="#7b61a8" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
 <path d="M970 610 H1000 V620 H1268 V635" fill="none" stroke="#7b61a8" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
 <rect x="72" y="670" width="1256" height="52" rx="12" fill="#fff7e6" stroke="#f2c56b"/>
-<text x="700" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#6b4f00">Live GET bypasses Lambda and queries DynamoDB directly. DAX and API Gateway caching are template-only and were not deployed.</text>
+<text x="700" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#6b4f00">Secure order APIs with on-demand storage, rate protection, and centralized observability.</text>
 <text x="700" y="742" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="400" fill="#68778d">AWS architecture icons: official AWS icon set (Q1 2022)</text>
 </svg>
