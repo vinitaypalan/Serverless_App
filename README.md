@@ -1,84 +1,89 @@
 # Serverless Orders API
 
-AWS SAM project for storing and retrieving order items in DynamoDB. The table uses `orderId` as its partition key and `itemId` as its sort key. The API is protected by Amazon Cognito and an AWS WAF rate-based rule.
+## Project objective
 
-> **Deployment status:** The deployed stack is not identical to the current template. The latest DAX/VPC deployment rolled back because AWS rejected DAX service access for this account. This README calls out the live configuration separately from the configuration currently described by `template.yaml`.
+This project demonstrates how to build and evolve a serverless order service on AWS. It stores order items in DynamoDB, exposes create and read operations through an API Gateway REST API, and adds authentication, request protection, monitoring, and an automated deployment workflow.
+
+The project also records optimization and resilience ideas, including DynamoDB Accelerator (DAX), API Gateway caching, and DynamoDB Global Tables. These are documented separately from the features that are currently deployed, because account restrictions and CloudFormation migration constraints prevented some of them from being activated.
 
 ## Architecture
 
-### Currently deployed in AWS (`us-east-1`)
+### Current AWS deployment
 
-```mermaid
-flowchart LR
-    Client[Client]
-    Cognito[Amazon Cognito<br/>User Pool authorizer]
-    WAF[AWS WAF<br/>1000 requests per IP / 5 min]
-    API[API Gateway REST API<br/>Prod stage]
-    Lambda[SaveOrderFunction<br/>Node.js 22]
-    DDB[(DynamoDB<br/>Orders table)]
-    Dashboard[CloudWatch dashboard]
-    XRay[AWS X-Ray]
-
-    Client -->|authenticate| Cognito
-    Cognito -->|JWT token| Client
-    Client -->|request with JWT| WAF
-    WAF --> API
-    API -->|POST /orders<br/>Lambda proxy| Lambda
-    Lambda -->|PutItem| DDB
-    API -->|GET /orders/{orderId}<br/>DynamoDB Query integration| DDB
-    API -. metrics .-> Dashboard
-    Lambda -. invocations and errors .-> Dashboard
-    Lambda -. active tracing .-> XRay
+```text
+                         Cognito User Pool
+                       (API request authorizer)
+                                |
+Client -- JWT request --> AWS WAF --> API Gateway REST API (Prod)
+                                         |
+                       +-----------------+-----------------+
+                       |                                   |
+                POST /orders                      GET /orders/{orderId}
+               Lambda proxy                 Direct DynamoDB Query integration
+                       |                                   |
+                       +------------> DynamoDB <-----------+
+                                      Orders table
+                                          |
+                          CloudWatch dashboard and X-Ray
 ```
 
-### Intended by the current template (not fully deployed)
+### Intended optimization design in the current template
 
-```mermaid
-flowchart LR
-    Client[Client]
-    Cognito[Cognito authorizer]
-    WAF[AWS WAF]
-    API[API Gateway REST API<br/>GET cache TTL 300 seconds]
-    Lambda[SaveOrderFunction<br/>Node.js 22]
-    DDB[(Orders DynamoDB table)]
-    subgraph VPC[Private VPC created by the template]
-        Lambda
-        DAX[DynamoDB Accelerator<br/>single dax.t3.small node]
-        Lambda -->|GET query| DAX
-    end
-    DAX --> DDB
-    Lambda -->|POST PutItem through<br/>DynamoDB gateway endpoint| DDB
-    Client -->|authenticate| Cognito
-    Cognito -->|JWT token| Client
-    Client -->|request with JWT| WAF
-    WAF --> API
-    API -->|POST /orders| Lambda
-    API -->|GET /orders/{orderId}| Lambda
+```text
+Client -- JWT request --> Cognito authorizer --> AWS WAF --> API Gateway
+                                                              |
+                                           +------------------+------------------+
+                                           |                                     |
+                                  POST /orders                          GET /orders/{orderId}
+                                  Lambda proxy                             Lambda proxy
+                                           |                                     |
+                                           |                              Lambda in private VPC
+                                           |                                     |
+                                           |                       DAX (single dax.t3.small node)
+                                           |                                     |
+                                           +------ DynamoDB gateway endpoint --> DynamoDB
+
+Private VPC: two private subnets, Lambda security group, DAX security group,
+and DAX subnet group. API Gateway GET caching is configured with a 300-second
+TTL and orderId as the cache key.
 ```
 
-## Feature status
+The second diagram describes the design in the template and source code, not the live AWS deployment. DAX provisioning failed for this account, so the stack rolled back before those resources were created.
 
-Status checked against the AWS account and stack `orders-table-stack` in `us-east-1` on 2026-10-27.
+## How the project was developed
 
-| Feature | In the current template/source | Deployed status |
+1. **Order storage:** Created the `Orders` DynamoDB table with `orderId` as the string partition key, `itemId` as the string sort key, and on-demand billing. This supports storing multiple items for one order without pre-provisioning read/write capacity.
+2. **Order creation:** Added a Node.js 22 Lambda handler that validates `orderId` and `itemId` and writes each item with DynamoDB `PutItem`. Its IAM permissions are scoped to the table.
+3. **REST API:** Added `POST /orders` to create orders and `GET /orders/{orderId}` to retrieve an order's items. The currently deployed GET method directly integrates API Gateway with DynamoDB `Query`, so it does not invoke Lambda.
+4. **Authentication and request protection:** Added a Cognito User Pool authorizer and a regional AWS WAF rate-based rule configured to block an IP after 1,000 requests in the five-minute evaluation window. User creation is admin-only. A Cognito hosted login domain was not configured.
+5. **Observability:** Added a CloudWatch dashboard for API Gateway `Count` and `4XXError`, and Lambda `Invocations` and `Errors`. Enabled active X-Ray tracing on the Lambda.
+6. **Build and delivery:** Configured SAM/esbuild to minify the Lambda bundle. Added a GitHub Actions workflow to build and deploy on pushes to `main` or manual dispatch, using GitHub OIDC to assume an AWS role.
+7. **Read-performance experiment:** Changed the source design so Lambda handles GET reads through DAX and configured API Gateway caching with the order ID as the cache key and a 300-second TTL. This requires a VPC for Lambda and DAX, so the template also describes private subnets, security groups, and a DynamoDB gateway endpoint.
+8. **Multi-Region experiment:** Considered DynamoDB Global Tables with a replica in `eu-west-1`. CloudFormation rejected changing the existing table resource type in place, so that change was reverted. The current template enables a `NEW_AND_OLD_IMAGES` stream, but does not configure a replica.
+
+## Current feature status
+
+Status reflects the project files and AWS stack `orders-table-stack` in `us-east-1`, last checked on 2026-10-27.
+
+| Capability | Project files | AWS deployment |
 |---|---|---|
-| DynamoDB `Orders` table, composite key, on-demand billing | Yes | Active in `us-east-1` |
-| `POST /orders` creates an item through Lambda | Yes | Deployed; Cognito-protected |
-| `GET /orders/{orderId}` reads order items | Template routes through Lambda/DAX | Deployed as a direct API Gateway-to-DynamoDB `Query` integration; does not invoke Lambda |
-| Cognito User Pool authorizer | Yes; admin-created users only by default | Deployed |
-| Hosted Cognito login page/domain | Not configured | Not available |
-| WAF rate limiting | 1,000 requests per IP over the five-minute evaluation window | Deployed and associated with the API stage |
-| CloudWatch dashboard | API Gateway `Count`/`4XXError`, Lambda `Invocations`/`Errors` | Deployed as `OrdersApiDashboard` |
-| Lambda X-Ray active tracing | Yes | Enabled on deployed Lambda |
-| API Gateway stage cache | GET caching configured with order ID cache key and 300-second TTL | Not deployed; stage cache is disabled |
-| DAX-backed Lambda reads and VPC | Configured in template/source | Not deployed; CloudFormation rolled back |
-| DynamoDB Streams | `NEW_AND_OLD_IMAGES` configured in template | Not deployed; the live table has no stream |
-| DynamoDB Global Table replica | Not configured in the current template | Not deployed |
-| GitHub Actions deployment | Push to `main` and manual dispatch | Workflow is present; deployment requires the configured AWS OIDC role |
+| DynamoDB `Orders` table, composite key, on-demand capacity | Configured | Active regional table |
+| `POST /orders` through Lambda | Configured | Deployed and Cognito-protected |
+| `GET /orders/{orderId}` | Source/template route through Lambda and DAX | Deployed as direct API Gateway-to-DynamoDB Query |
+| Cognito User Pool authorizer | Configured; admin-created users | Deployed |
+| Hosted Cognito login page | Not configured | Not available |
+| WAF rate limiting | Configured at 1,000 requests per IP | Deployed and associated with API stage |
+| CloudWatch dashboard | Configured | Deployed as `OrdersApiDashboard` |
+| Lambda active X-Ray tracing | Configured | Enabled |
+| API Gateway GET caching | Configured for 300 seconds | Not deployed; stage cache is disabled |
+| DAX and supporting VPC | Configured in template/source | Not deployed; stack update rolled back |
+| DynamoDB Streams | `NEW_AND_OLD_IMAGES` configured | Not deployed; live table has no stream |
+| DynamoDB Global Table replica | Not configured | Not deployed |
+| GitHub Actions deployment | Workflow configured | Push to `main` starts a deployment workflow |
 
-The latest stack status is `UPDATE_ROLLBACK_COMPLETE`. Its deployed API still has both `POST /orders` and `GET /orders/{orderId}`. The live GET method directly queries DynamoDB using an API Gateway IAM role. The deployed Lambda is active on Node.js 22, has active X-Ray tracing, and currently has `TABLE_NAME=Orders` without a DAX endpoint.
+The latest observed CloudFormation stack status is `UPDATE_ROLLBACK_COMPLETE`. The DAX attempt failed while creating the DAX subnet group with an AWS error stating that the access key needs a subscription for DAX. The live Lambda is active on Node.js 22, has active tracing, and has `TABLE_NAME=Orders`; it has no DAX endpoint and is not VPC-attached. The live DynamoDB table has no stream or replica.
 
-## API
+## API details
 
 Base URL:
 
@@ -86,58 +91,42 @@ Base URL:
 https://wgybxq9dkf.execute-api.us-east-1.amazonaws.com/Prod
 ```
 
-| Method and path | Purpose | Deployed integration |
+| Method and path | Purpose | Live integration |
 |---|---|---|
-| `POST /orders` | Save an order item | Lambda proxy; Lambda uses DynamoDB `PutItem` |
-| `GET /orders/{orderId}` | Retrieve items for an order | API Gateway directly calls DynamoDB `Query` |
+| `POST /orders` | Save an order item | Lambda proxy; Lambda writes with DynamoDB `PutItem` |
+| `GET /orders/{orderId}` | Retrieve all items for an order | API Gateway calls DynamoDB `Query` directly |
 
-Both methods require a valid Cognito User Pool token. Send it as:
+Both routes require a valid Cognito User Pool token in the `Authorization` header:
 
 ```http
 Authorization: Bearer <cognito-id-token>
 ```
 
-The `POST` body must be JSON containing non-empty string keys `orderId` and `itemId`. Other JSON properties are saved as part of the item. Lambda returns `201` when the item is written and `400` for invalid JSON or missing/invalid keys.
+The POST body is JSON with non-empty string values for `orderId` and `itemId`. Other JSON properties are saved on the item. Lambda returns `201` after saving, or `400` for invalid JSON or missing/invalid keys.
 
-The User Pool is admin-managed (`AllowAdminCreateUserOnly: true`). There is no hosted UI domain, so users must be created and authenticated through a configured client/application flow before calling the API.
+The User Pool is configured for administrator-created users only. The project does not configure a hosted UI domain or a user-facing login page.
 
-## Components and design choices
+## Optimization and resilience options
 
-- **DynamoDB:** `Orders` is an on-demand (`PAY_PER_REQUEST`) regional table in `us-east-1`, with `orderId` (string) as the partition key and `itemId` (string) as the sort key.
-- **Lambda:** `src/index.js` handles order writes and, in the current source, DAX-backed order reads. AWS SDK/DAX clients are initialized outside the handler for reuse between warm invocations.
-- **IAM:** Lambda has `PutItem` access to the table. The direct API Gateway GET integration uses a role with `dynamodb:Query` access to the table. DAX access and VPC execution permissions are in the proposed template.
-- **Cognito:** Default API authorizer; user creation is restricted to administrators. Hosted login is not configured.
-- **WAF:** Regional Web ACL blocks IPs exceeding the configured rate limit.
-- **Monitoring:** CloudWatch dashboard and active Lambda X-Ray tracing.
-- **Build optimization:** SAM/esbuild minifies the Lambda bundle. The AWS SDK modules used by the original handler are externalized to use the Node.js 22 runtime SDK; the DAX client currently adds the legacy AWS SDK for JavaScript v2 dependency.
-- **CI/CD:** `.github/workflows/deploy.yml` runs for pushes to `main` and manual dispatch. It uses GitHub OIDC to assume `arn:aws:iam::525391386782:role/GitHubActions-OrdersAPI-Deploy`, installs dependencies with `npm ci`, builds with SAM, and deploys to `us-east-1`.
+### DAX and API Gateway caching
 
-## DAX and API caching: optional optimization
+DAX can cache DynamoDB reads for applications that need lower read latency, and API Gateway caching can reuse responses for repeated GET requests. In this project, DAX would require Lambda and DAX to run inside a VPC; API Gateway caching is separately configured for the GET route with a 300-second TTL.
 
-The current template configures:
+These resources are **not deployed**. AWS rejected DAX provisioning for this account. DAX nodes and API Gateway stage caches can incur ongoing charges; the configured single `dax.t3.small` node does not provide node-level high availability. Check account eligibility, service availability, and pricing before enabling this design. The Node.js DAX client also depends on AWS SDK for JavaScript v2, which is end-of-support; npm audit reported moderate advisories in the dependency chain with no fixes available.
 
-- A private VPC with two private subnets.
-- A DynamoDB gateway endpoint so the VPC-attached Lambda can continue writing to DynamoDB without a NAT gateway.
-- A single-node `dax.t3.small` DAX cluster for Lambda reads.
-- API Gateway stage caching for `GET /orders/{orderId}` with the order ID as a cache key and a 300-second TTL.
+For a simpler deployment, remove the DAX resources, DAX-specific VPC/security/IAM configuration, and DAX client usage; keep the direct API Gateway-to-DynamoDB GET integration. Disable API Gateway caching if its cost is not appropriate.
 
-**This configuration is not deployed.** CloudFormation failed while creating the DAX subnet group with an AWS error stating that the access key needs a subscription for DAX. The stack rolled back. Resolve DAX account/service access before attempting deployment again, or remove DAX and its associated VPC/security/IAM resources and restore a DynamoDB-only GET integration.
+### DynamoDB Global Tables
 
-DAX and API Gateway caching can incur ongoing charges. A single DAX node does not provide node-level high availability. API Gateway stage caching also has a cost. Check current AWS pricing and service/account eligibility before enabling these resources. The current Node.js DAX client (`amazon-dax-client`) depends on AWS SDK for JavaScript v2, which is end-of-support; npm audit reported moderate advisories in that dependency chain with no fixes available.
+The deployed `Orders` table is regional. CloudFormation rejected an attempt to change the existing resource from `AWS::DynamoDB::Table` to `AWS::DynamoDB::GlobalTable` with “Update of resource type is not permitted.” That change was reverted.
 
-## Global Tables and disaster recovery
-
-The deployed `Orders` table is a regional table. The current template retains `AWS::DynamoDB::Table` and enables `NEW_AND_OLD_IMAGES` streams, but that stream update has not deployed. There is no replica configured in `eu-west-1`.
-
-An earlier attempt to change the existing CloudFormation resource from `AWS::DynamoDB::Table` to `AWS::DynamoDB::GlobalTable` was rejected during change-set creation with **“Update of resource type is not permitted.”** The change was reverted. Do not change the existing resource type in place: create a separately named Global Table, copy and verify data, cut the application over, then retire the original table if multi-Region replication is required. Global Tables replicate asynchronously and add costs in each Region.
+For multi-Region disaster recovery, use a separate migration: create a separately named Global Table, copy and verify existing data, update the application to use it, and retire the original table only after a validated cutover. Global Table replication is asynchronous and incurs costs in each Region. The current template does not create a replica.
 
 ## Build and deploy
 
-Prerequisites: Node.js 22, npm, AWS SAM CLI, and AWS credentials authorized to deploy this stack.
+Prerequisites: Node.js 22, npm, AWS SAM CLI, and AWS credentials authorized to deploy the stack.
 
-### PowerShell build
-
-From the project directory:
+In PowerShell, from the project directory:
 
 ```powershell
 cd "C:\path\to\SERVERLESS_APP"
@@ -156,15 +145,26 @@ sam validate --template-file template.yaml --lint
 sam build
 ```
 
-The esbuild path is added explicitly because some PowerShell sessions do not expose Node/npm/esbuild on `PATH` automatically. `sam build` does not change AWS resources.
+`sam build` is local and does not change AWS resources. Add the esbuild executable directory to `PATH` as shown if SAM cannot locate esbuild.
 
-### Deploy
+To deploy the existing stack:
 
 ```powershell
 sam deploy --stack-name orders-table-stack --region us-east-1 --resolve-s3 --capabilities CAPABILITY_IAM
 ```
 
-Review the CloudFormation change set before approving it. The current template includes DAX resources, so deployment is expected to roll back until the account's DAX access issue is resolved or the DAX configuration is removed.
+Review the CloudFormation change set before approving it. With the current template, DAX provisioning is expected to roll back until account access is resolved or the DAX design is removed.
+
+## Automated deployment
+
+`.github/workflows/deploy.yml` runs on pushes to `main` and on manual dispatch. It:
+
+1. Checks out the repository and configures Node.js 22 and AWS SAM CLI.
+2. Installs the locked Lambda dependencies with `npm ci`.
+3. Uses GitHub OIDC to assume `arn:aws:iam::525391386782:role/GitHubActions-OrdersAPI-Deploy`.
+4. Builds and deploys `orders-table-stack` in `us-east-1`.
+
+The AWS role trust policy must allow GitHub Actions from this repository to assume it. A push to `main` deploys automatically; the DAX account restriction can cause that deployment to fail until resolved or the DAX resources are removed.
 
 ## Repository layout
 
@@ -172,11 +172,11 @@ Review the CloudFormation change set before approving it. The current template i
 .
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml       # GitHub Actions build and deployment workflow
+│       └── deploy.yml       # CI/CD build and deployment
 ├── src/
 │   ├── index.js             # Lambda handler
 │   ├── package.json         # Runtime and build dependencies
 │   └── package-lock.json    # Locked npm dependency graph
 ├── template.yaml            # SAM and CloudFormation resources
-└── README.md
+└── README.md                # Project objective, architecture, and development history
 ```
