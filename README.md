@@ -10,22 +10,9 @@ The project also records optimization and resilience ideas, including DynamoDB A
 
 ### Current AWS deployment
 
-```text
-                         Cognito User Pool
-                       (API request authorizer)
-                                |
-Client -- JWT request --> AWS WAF --> API Gateway REST API (Prod)
-                                         |
-                       +-----------------+-----------------+
-                       |                                   |
-                POST /orders                      GET /orders/{orderId}
-               Lambda proxy                 Direct DynamoDB Query integration
-                       |                                   |
-                       +------------> DynamoDB <-----------+
-                                      Orders table
-                                          |
-                          CloudWatch dashboard and X-Ray
-```
+![AWS architecture diagram for the currently deployed Orders API](docs/orders-architecture.svg)
+
+The diagram uses AWS architecture service icons. The diagram file is self-contained so it can be displayed directly by GitHub without loading external image links. Icon source: [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/), Q1 2022 package.
 
 ### Intended optimization design in the current template
 
