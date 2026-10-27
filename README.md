@@ -66,11 +66,17 @@ The User Pool is admin-managed. A Cognito hosted UI domain or user-facing login 
 
 ## Future improvements
 
+### Proposed DAX read optimization
+
+![AWS architecture diagram for the proposed DAX and API caching design](docs/orders-optimization-architecture.svg)
+
+In this design, both API methods invoke Lambda inside a private VPC. Reads query DAX, while writes continue to use DynamoDB through a VPC gateway endpoint. API Gateway caches GET responses for 300 seconds using the order ID as the cache key. This is an optional future design, not part of the current deployment.
+
 - **Faster repeated reads:** DAX can cache DynamoDB reads. API Gateway stage caching can reuse GET responses; the proposed setting uses `orderId` as the cache key and a 300-second TTL.
 - **Multi-Region recovery:** DynamoDB Global Tables can replicate data to another Region, such as `eu-west-1`.
 - **Change data capture:** DynamoDB Streams can publish table changes for downstream processing.
 
-These are extension paths, not part of the deployed architecture. Consider account eligibility, operational needs, and AWS pricing before adopting them.
+These are extension paths, not part of the deployed architecture. Consider account eligibility, operational needs, and AWS pricing before adopting them. Both architecture diagrams use AWS icons embedded in the SVG files, so they render in GitHub without external image requests.
 
 ## Challenges and lessons learned
 
@@ -123,8 +129,9 @@ Review the CloudFormation change set before approving it, especially when changi
 │   └── workflows/
 │       └── deploy.yml       # CI/CD build and deployment
 ├── docs/
-│   ├── assets/aws/          # AWS service icon source SVGs
-│   └── orders-architecture.svg
+│   ├── assets/aws/                    # AWS service icon source SVGs
+│   ├── orders-architecture.svg        # Deployed architecture
+│   └── orders-optimization-architecture.svg
 ├── src/
 │   ├── index.js             # Lambda handler
 │   ├── package.json         # Runtime and build dependencies
