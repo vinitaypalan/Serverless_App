@@ -25,11 +25,179 @@ Resources:
     Properties:
       Name: OrdersApi
       StageName: Prod
+      CacheClusterEnabled: true
+      CacheClusterSize: '0.5'
+      MethodSettings:
+        - ResourcePath: /orders/{orderId}
+          HttpMethod: GET
+          CachingEnabled: true
+          CacheTtlInSeconds: 300
+          CacheDataEncrypted: true
+      DefinitionBody:
+        openapi: 3.0.1
+        info:
+          title: OrdersApi
+          version: '1.0'
+        paths:
+          /orders:
+            post:
+              responses:
+                '201':
+                  description: Order item created
+                '400':
+                  description: Invalid order request
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SaveOrderFunction.Arn}/invocations
+          /orders/{orderId}:
+            get:
+              parameters:
+                - name: orderId
+                  in: path
+                  required: true
+                  schema:
+                    type: string
+              responses:
+                '200':
+                  description: Order items retrieved
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SaveOrderFunction.Arn}/invocations
+                cacheKeyParameters:
+                  - method.request.path.orderId
       Auth:
         DefaultAuthorizer: OrdersCognitoAuthorizer
         Authorizers:
           OrdersCognitoAuthorizer:
             UserPoolArn: !GetAtt OrdersUserPool.Arn
+
+  OrdersVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: OrdersVpc
+
+  OrdersPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrdersVpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+
+  OrdersPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrdersVpc
+      CidrBlock: 10.20.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+
+  OrdersPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OrdersVpc
+
+  OrdersPrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref OrdersPrivateSubnetA
+      RouteTableId: !Ref OrdersPrivateRouteTable
+
+  OrdersPrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref OrdersPrivateSubnetB
+      RouteTableId: !Ref OrdersPrivateRouteTable
+
+  OrdersDynamoDbEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      VpcId: !Ref OrdersVpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      RouteTableIds:
+        - !Ref OrdersPrivateRouteTable
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - dynamodb:PutItem
+            Resource: !GetAtt OrdersTable.Arn
+
+  OrdersLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda access to the Orders DAX cluster
+      VpcId: !Ref OrdersVpc
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  OrdersDaxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow DAX connections from the Orders Lambda
+      VpcId: !Ref OrdersVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8111
+          ToPort: 8111
+          SourceSecurityGroupId: !Ref OrdersLambdaSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  OrdersDaxSubnetGroup:
+    Type: AWS::DAX::SubnetGroup
+    Properties:
+      Description: Private subnets for the Orders DAX cluster
+      SubnetIds:
+        - !Ref OrdersPrivateSubnetA
+        - !Ref OrdersPrivateSubnetB
+
+  OrdersDaxRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dax.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadOrdersTable
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt OrdersTable.Arn
+
+  OrdersDaxCluster:
+    Type: AWS::DAX::Cluster
+    Properties:
+      ClusterName: orders-dax
+      IAMRoleARN: !GetAtt OrdersDaxRole.Arn
+      NodeType: dax.t3.small
+      ReplicationFactor: 1
+      SubnetGroupName: !Ref OrdersDaxSubnetGroup
+      SecurityGroupIds:
+        - !GetAtt OrdersDaxSecurityGroup.GroupId
 
   OrdersTable:
     Type: AWS::DynamoDB::Table
@@ -46,9 +214,19 @@ Resources:
         - AttributeName: itemId
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
 
   SaveOrderFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: node22
+        External:
+          - "@aws-sdk/client-dynamodb"
+          - "@aws-sdk/lib-dynamodb"
     Properties:
       CodeUri: src/
       Handler: index.handler
@@ -58,19 +236,40 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref OrdersTable
+          DAX_ENDPOINT: !GetAtt OrdersDaxCluster.ClusterDiscoveryEndpoint
+      VpcConfig:
+        SecurityGroupIds:
+          - !GetAtt OrdersLambdaSecurityGroup.GroupId
+        SubnetIds:
+          - !Ref OrdersPrivateSubnetA
+          - !Ref OrdersPrivateSubnetB
       Policies:
+        - AWSLambdaVPCAccessExecutionRole
         - Statement:
             - Effect: Allow
               Action:
                 - dynamodb:PutItem
               Resource: !GetAtt OrdersTable.Arn
-      Events:
-        CreateOrder:
-          Type: Api
-          Properties:
-            RestApiId: !Ref OrdersApi
-            Path: /orders
-            Method: post
+            - Effect: Allow
+              Action:
+                - dax:Query
+              Resource: !GetAtt OrdersDaxCluster.Arn
+
+  SaveOrderApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SaveOrderFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${OrdersApi}/*/POST/orders
+
+  GetOrderItemsApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SaveOrderFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${OrdersApi}/*/GET/orders/*
 
   OrdersWebAcl:
     Type: AWS::WAFv2::WebACL
@@ -154,6 +353,12 @@ Outputs:
   OrdersApiUrl:
     Description: URL for the authenticated order-creation API
     Value: !Sub https://${OrdersApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/orders
+  GetOrderItemsApiUrl:
+    Description: URL for retrieving all items for an order
+    Value: !Sub https://${OrdersApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/orders/{orderId}
+  OrdersDaxClusterEndpoint:
+    Description: Private DAX endpoint accessible from the Orders VPC
+    Value: !GetAtt OrdersDaxCluster.ClusterDiscoveryEndpoint
   OrdersUserPoolId:
     Description: Cognito user pool ID for API users
     Value: !Ref OrdersUserPool

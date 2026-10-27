@@ -25,6 +25,9 @@ jobs:
       - name: Set up AWS SAM CLI
         uses: aws-actions/setup-sam@v2
 
+      - name: Install Lambda dependencies
+        run: npm ci --prefix src
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:

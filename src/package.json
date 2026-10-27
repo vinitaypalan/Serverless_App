@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.800.0",
-    "@aws-sdk/lib-dynamodb": "^3.800.0"
+    "amazon-dax-client": "1.2.10",
+    "aws-sdk": "2.1692.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
   }
 }

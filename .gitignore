@@ -2,6 +2,9 @@
 # AWS SAM generated build files
 .aws-sam/
 
+# Node.js installed dependencies
+node_modules/
+
 # Local environment and credentials
 .env
 .env.*
